@@ -1,0 +1,1226 @@
+---
+title: "Analysis of DOHMH New York City Restaurant Inspection Results"
+author: "Sarthak Dawar"
+output:
+  html_document:
+    code_folding: hide
+    fig_width: 8
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(plotly)
+library(lubridate)
+library(ggplot2)
+library(sampling)
+options(scipen = 99)
+knitr::opts_chunk$set(fig.width=12, fig.height=8,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+# About the Dataset
+The dataset contains every sustained or not yet adjudicated violation citation from every full or special program inspection conducted up to three years prior to the most recent inspection for restaurants and college cafeterias in an active status on the RECORD DATE (date of the data pull). When an inspection results in more than one violation, values for associated fields are repeated for each additional violation record. Establishments are uniquely identified by their CAMIS (record ID) number. Only restaurants in an active status are included in the dataset.
+
+Records are also included for each restaurant that has applied for a permit but has not yet been inspected and for inspections resulting in no violations. Establishments with inspection date of 1/1/1900 are new establishments that have not yet received an inspection. Restaurants that received no violations are represented by a single row and coded as having no violations using the ACTION field.
+
+So how are these grades actually determined? Per DOHMH, restaurants receive an initial inspection during which they are assigned points for any violations found. If those points add up to less than 14, the restaurant receives an A and will be reinspected in 12 months. If the restaurant receives 14 or more points, the restaurant will be reinspected 7 or more days later. The score from the re-inspection determines the grade to be posted. If the restaurant scores more than 14 points again, they have the option of posting their B or C grade card or a “GRADE PENDING” card, until their violations are adjudicated through an Office of Administrative Trials and Hearings (OATH) hearing. This process is summarized in the graphic below.
+
+![Inspection Process](..\images\InspectionProcess.jpg)
+
+In other words, each restaurant has three chances per cycle to receive an A (Initial inspection, re-inspection, final adjudication). Note that the initial score also determines how quickly the inspection cycle begins again for  each restaurant; restaurants with a higher number of violations are reinspected sooner than those with fewer violations. This graphic also does not describe conditions under which restaurants face closure by the DOHMH.
+
+This dataset and the information on the Health Department’s Restaurant Grading website come from the same data source. 
+
+The data about inspection result can be found at https://data.cityofnewyork.us/Health/DOHMH-New-York-City-Restaurant-Inspection-Results/43nn-pn8j
+
+The Health Department’s Restaurant Grading website is here:
+http://www1.nyc.gov/site/doh/services/restaurant-grades.page
+
+# Goal
+The goal of this project is to analyze and interpret the results across multiple variables and find interesting observations, co-relations or patterns
+
+# Dataset Analysis
+> Load the data set
+
+```{r, echo=TRUE}
+inspection <- read.csv('..\\data\\DOHMH_New_York_City_Restaurant_Inspection_Results.csv')
+knitr::kable(head(inspection))
+```
+
+> Columns
+
+```{r, echo=TRUE}
+colnames(inspection)
+```
+
+> Number of rows
+
+```{r, echo=TRUE}
+orig_rows <- nrow(inspection)
+orig_rows
+```
+
+> Let us remove columns that are not of interest for our analysis and rename some of them that we will keep
+
+```{r, echo=TRUE}
+drop <- c('BUILDING','STREET','PHONE','RECORD.DATE','GRADE.DATE','Community.Board','Council.District',
+          'Census.Tract','BIN','BBL','NTA')
+          
+inspection[,drop] <- list(NULL)
+
+inspection <- dplyr::rename(inspection,
+      ESTABLISHMENT = DBA,
+      BOROUGH = BORO,
+      CUISINE = CUISINE.DESCRIPTION,
+      LATITUDE = Latitude,
+      LONGITUDE = Longitude)
+
+
+cat('Final columns:\n', paste0('"',colnames(inspection),'"','\n'))
+```
+
+> Renaming two cuisines for ease of plotting
+
+```{r, echo=TRUE}
+inspection[inspection$CUISINE == 
+             'Latin (Cuban, Dominican, Puerto Rican, South & Central American)',
+           "CUISINE"] = "Latin"
+
+inspection[inspection$CUISINE == "CafÃ©/Coffee/Tea",
+           "CUISINE"] = "Cafe"
+paste('Columns renamed')
+```
+
+> Check for unique years in Inspection Date
+
+```{r, echo=TRUE}
+u_year <- unique(year(mdy(inspection$INSPECTION.DATE)))
+paste(u_year)
+
+error_nrows <- length(which(year(mdy(inspection$INSPECTION.DATE)) == "1900"))
+
+paste('Number of rows containing inspection year as 1900:', error_nrows)
+```
+
+> "1/1/1900" represents that the establishment has not yet been inspected and so we will
+remove this data from our analysis
+
+```{r, echo=TRUE}
+inspection <- inspection[year(mdy(inspection$INSPECTION.DATE)) != "1900",]
+paste('Number of rows removed:', (orig_rows - nrow(inspection)))
+```
+
+> We will remove date from 2012, 2013, 2014, 2015 as these are only around 200 records
+
+```{r, echo=TRUE}
+paste("Number of rows for year 2012-2015:", nrow(inspection[year(mdy(inspection$INSPECTION.DATE)) %in% c("2012","2013","2014","2015"),]))
+inspection <- inspection[year(mdy(inspection$INSPECTION.DATE)) %in% c("2016","2017","2018","2019","2020"),]
+```
+
+> We will add two columns, one will store year part of inspection date and other will store month. These will come handy during our plots
+
+```{r, echo=TRUE}
+inspection$YEAR = year(mdy(inspection$INSPECTION.DATE))
+inspection$YEAR = as.character(inspection$YEAR)
+inspection$MONTH = month(mdy(inspection$INSPECTION.DATE), label = TRUE)
+cat('Columns:\n', paste0('"',colnames(inspection),'"','\n'))
+```
+
+> How many unique establishments are there in the data set?
+
+```{r, echo=TRUE}
+length(unique(inspection$CAMIS))
+```
+
+> In which borough the inspections are held
+
+```{r, echo=TRUE}
+unique(inspection$BOROUGH)
+```
+
+> There are `r nrow(inspection[inspection$BOROUGH == 0,])` rows with borough as 0. We will remove these as part of our data clean up
+
+```{r, echo=TRUE}
+inspection <- inspection[inspection$BOROUGH != 0,]
+paste("Rows removed for Borough = 0")
+```
+
+## Restaurants
+### Restaurants by borough
+```{r, echo=TRUE}
+inspection %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(n=dplyr::n(), BOROUGH = unique(BOROUGH)) %>%
+  dplyr::ungroup() %>%
+  plot_ly(x = ~BOROUGH) %>%
+  add_histogram() %>%
+  layout(title = "Number of Restuarants in each borough from Jan 2016 to Nov 2020",
+         xaxis = list(title="Borough"),
+         yaxis = list(title="Total number of restaurants"),
+         bargap = 0.5)
+```
+
+> __Interpretations__
+
+- Manhattan has the highest number of restaurants followed by Brooklyn, Queens, Bronx and finally Staten Island
+- Low number of restaurants on Staten Island is also interesting
+
+### Top 10 Restaurants by numbers in cuisine category from Jan 2016 to Nov 2020
+```{r, echo=TRUE}
+cuisine <- inspection %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(CUISINE = unique(CUISINE)) %>%
+  dplyr::ungroup()
+
+cuisine <- as.data.frame(dplyr::count(cuisine, cuisine$CUISINE))
+cuisine <- dplyr::rename(cuisine, 
+                         "CUISINE" = "cuisine$CUISINE", 
+                         "COUNT" = "n")
+cuisine <- cuisine[order(cuisine$COUNT, decreasing = TRUE),]
+
+cuisine[1:10,] %>%
+  plot_ly(x = ~CUISINE, y = ~COUNT, type = "bar") %>%
+  layout(title = "Top 10 restaurants by numbers in cuisine category from Jan 2016 to Nov 2020 ",
+         xaxis = list(categoryorder = "array", 
+         categoryarray = ~CUISINE),
+         yaxis = list(title="Number of restaurants"),
+         bargap = 0.5)
+```
+
+> __Interpretations__
+
+- American cuisine is the number one cuisine and has more than double the number of restaurants than its nearest competitor
+- Apart from famous cuisines like Chinese, Mexican & Italian, other popular ones are Latin, Caribbean & Japanese. This may also due to the diverse geographic population living in NY
+
+## Inspections
+
+### Inspections by year
+```{r, echo=TRUE}
+inspection %>%
+  dplyr::group_by(CAMIS, YEAR) %>%
+  dplyr::summarise(n=as.character(length(unique(INSPECTION.DATE))), YEAR = unique(YEAR)) %>%
+  dplyr::ungroup() %>%
+  plot_ly(x = ~YEAR, y = ~n, histfunc = "sum", type = "histogram") %>%
+  layout(title = "Number of inspections/year",
+         xaxis = list(title="Year"),
+         yaxis = list(title="Inspections", type = "linear"),
+         bargap = 0.5)
+
+
+#p <- plot_ly(x = inspection$YEAR) %>%
+#  add_histogram() %>%
+#  layout(title = "Number of inspections/year",
+#         xaxis = list(title="Year"),
+#         yaxis = list(title="Inspections"),
+#         bargap = 0.4)
+#p
+```
+
+> __Interpretations__
+
+- We can clearly see that the number of inspections in the data set has been steadily increasing over the years
+- There can be number of reasons for it:
+  + More number of inspections are being recorded and entered into the system
+  + Number of restaurants have increased over the years
+  + Health department has become strict and is doing more inspections
+- We can see a stark contrast in year 2020 where inspections are very low. This can be explained by many restaurants closing down due to the COVID pandemic and/or inspections not being performed on a regular basis.
+
+### Inspections by month
+```{r, echo=TRUE}
+inspection %>%
+  dplyr::group_by(CAMIS, MONTH) %>%
+  dplyr::summarise(n=as.character(length(unique(INSPECTION.DATE))), MONTH = unique(MONTH)) %>%
+  dplyr::ungroup() %>%
+  plot_ly(x = ~MONTH, y = ~n, histfunc = "sum", type = "histogram") %>%
+  layout(title = "Number of inspections/month",
+         xaxis = list(title="Month"),
+         yaxis = list(title="Inspections", type = "linear"),
+         bargap = 0.5)
+
+#p <- plot_ly(x = inspection$MONTH) %>%
+#  add_histogram() %>%
+#  layout(title = "Number of inspections/month (Jan 2016 - Nov 2020)",
+#         xaxis = list(title="Month"),
+#         yaxis = list(title="Inspections"),
+#         bargap = 0.4)
+#p
+```
+
+> __Interpretations__
+
+- Nothing out of the ordinary in this distribution.
+- Inspections are mostly uniformly distributed in the months, although Jan, Feb and March do appear to have higher inspections than other months
+
+### Inspections by month grouped by year
+```{r, echo=TRUE}
+tmp <- inspection %>%
+  dplyr::group_by(CAMIS, YEAR, MONTH) %>%
+  dplyr::summarise(n=as.character(length(unique(INSPECTION.DATE))), MONTH = unique(MONTH), YEAR = unique(YEAR)) %>%
+  dplyr::ungroup()
+  
+p <- plot_ly(x = ~MONTH, y = ~n, data = filter(tmp, YEAR == 2020), 
+             histfunc = "sum", type = "histogram", name = "2020") %>%
+  add_trace(x = ~MONTH, data = filter(tmp, YEAR == 2019), name = "2019") %>%
+  add_trace(x = ~MONTH, data = filter(tmp, YEAR == 2018), name = "2018") %>%
+  add_trace(x = ~MONTH, data = filter(tmp, YEAR == 2017), name = "2017") %>%
+  add_trace(x = ~MONTH, data = filter(tmp, YEAR == 2016), name = "2016") %>%
+  layout(title = "Number of inspections/month grouped by year",
+        xaxis = list(title="Month"),
+        yaxis = list(title="Inspections", type = "linear"),
+        legend = list(title=list(text='<b> Year </b>')))
+
+p
+ 
+#p <- plot_ly(x = ~MONTH, data = filter(inspection, YEAR == 2020), 
+#             type = "histogram", name = "2020") %>%
+#  add_trace(x = ~MONTH, data = filter(inspection, YEAR == 2019), name = "2019") %>%
+#  add_trace(x = ~MONTH, data = filter(inspection, YEAR == 2018), name = "2018") %>%
+#  add_trace(x = ~MONTH, data = filter(inspection, YEAR == 2017), name = "2017") %>%
+#  add_trace(x = ~MONTH, data = filter(inspection, YEAR == 2016), name = "2016") %>%
+#  layout(title = "Number of inspections/month grouped by year",
+#        xaxis = list(title="Month"),
+#        yaxis = list(title="Inspections"),
+#        legend = list(title=list(text='<b> Year </b>')))
+  
+#p
+```
+
+> __Interpretations__
+
+- As we had observed in previous plots, the number of inspections are increasing each year and that is what we observe here as well.
+- Inspections are increasing in the same month each year
+- Interestingly, inspections in 2020 for Jan, Feb seem to be following the trend of increasing inspections, but March shows very less inspections. From April onwards inspections are zero. This is explained by the lockdowns due to COVID. And later when the restaurants opened, either inspections have not happened or not uploaded in the system yet.
+
+### Inspections by Borough
+```{r, echo=TRUE}
+inspection %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(n=as.character(length(unique(INSPECTION.DATE))), 
+                   BOROUGH = unique(BOROUGH)) %>%
+  dplyr::ungroup() %>%
+  plot_ly(x = ~BOROUGH, y = ~n, type = "histogram", histfunc = "sum") %>%
+  layout(title = "Number of inspections in each borough (Jan 2016 - Nov 2020)",
+         xaxis = list(title="Borough"),
+         yaxis = list(title="Inspections", type = "linear"),
+         bargap = 0.5)
+
+```
+
+> __Interpretations__
+
+- Manhattan has the highest number of inspections, which makes sense as Manhattan has the most restaurants as we saw earlier.
+- The inspection trend closely follow the number of restaurants in that area, more restaurants more inspections
+
+> __Data Modification__
+
+- There are `r length(unique(inspection$CAMIS))` establishments in the dataset based on CAMIS ID, but there are multiple rows with same CAMIS ID. This is because establishments have had multiple inspections in all the years i.e., each row represents one restaurant/inspection pair. This would mean one restaurant would have multiple rows with grades, this data would not show correct picture if we were to analyze it based on grades. Let us cut our data so that we have only the most recent restaurant/inspection pair by each year.
+
+```{r, echo=TRUE}
+inspnew <- inspection %>%
+  dplyr::mutate(Date = mdy(INSPECTION.DATE)) %>%
+  dplyr::group_by(CAMIS, YEAR) %>%
+  dplyr::filter(Date == max(Date)) %>%
+  dplyr::ungroup()
+
+invisible(dplyr::ungroup(inspnew))
+inspnew <- subset(inspnew, select = -c(Date))
+paste("This dataset has", nrow(inspnew), "rows")
+```
+
+> __Split data by year__
+
+- Primarily we are going to focus on 2019 data, but wherever necessary, we will use other years data as well for analysis. Slicing the data to get 2019 data.
+
+```{r, echo=TRUE}
+df2019 <- inspnew[inspnew$YEAR == 2019,]
+paste("2019 dataset has", nrow(df2019), "rows")
+```
+
+## 2019 data analysis
+- Some stats about the violation scores for 2019
+```{r, echo=TRUE}
+tmp <- df2019 %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(SCORE = unique(SCORE)) %>%
+  dplyr::ungroup()
+
+paste("Max value of score:", max(tmp$SCORE, na.rm = TRUE))
+paste("Min value of score:", min(tmp$SCORE, na.rm = TRUE))
+paste("Mean value of score:", mean(tmp$SCORE, na.rm = TRUE))
+paste("Standard Deviation value of score:", sd(tmp$SCORE, na.rm = TRUE))
+```
+
+### Violation Score Distribution
+```{r, echo=TRUE}
+df2019 %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(SCORE = unique(SCORE)) %>%
+  dplyr::ungroup() %>%
+  plot_ly(x = ~SCORE, type = "histogram") %>%
+  layout(title = "Distribution of violation scores - 2019",
+    xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+    yaxis = list(title = "Count"),
+      bargap = 0.3) %>%
+  rangeslider()
+```
+
+> __Interpretations__
+
+- We can see 2 types of buckets here.
+- One is 0 to 13, where most of the scores lie. This bucket interestingly is the range where a restaurant would usually get an A grade. So it seems that most of the restaurants got A grade.
+- The other bucket with less frequency is from 14 to 27. Again, this is the range where a restaurant will get B grade.
+- There are some scores  = -1 as well. It might indicate that the restaurant was not scored due to some issue or some issue with the data entry.
+- Past 27, the frequency of scores as very low. This is where restaurant would get C grade. Hence, there would be very few restaurants getting grade C.
+- There are few scores at extreme right, suggesting that some restaurants were in really bad shape and had many violations.
+
+### Violation Score Distribution by Borough
+```{r, echo=TRUE}
+tmp <- df2019 %>%
+  dplyr::group_by(CAMIS, BOROUGH) %>%
+  dplyr::summarise(SCORE = unique(SCORE), BOROUGH = unique(BOROUGH)) %>%
+  dplyr::ungroup()
+
+brklyn <- tmp[tmp$BOROUGH == "Brooklyn",]
+bronx <- tmp[tmp$BOROUGH == "Bronx",]
+mnhttn <- tmp[tmp$BOROUGH == "Manhattan",]
+queens <- tmp[tmp$BOROUGH == "Queens",]
+staten <- tmp[tmp$BOROUGH == "Staten Island",]
+
+fit_brklyn <- density(brklyn$SCORE, na.rm = TRUE)
+fit_bronx <- density(bronx$SCORE, na.rm = TRUE)
+fit_mnhttn <- density(mnhttn$SCORE, na.rm = TRUE)
+fit_queens <- density(queens$SCORE, na.rm = TRUE)
+fit_staten <- density(staten$SCORE, na.rm = TRUE)
+
+plot_ly(x = ~fit_brklyn$x, y = ~fit_brklyn$y, type = 'scatter', mode = 'lines', 
+        fill = 'tozeroy', name = "Brooklyn") %>%
+  add_trace(x = ~fit_bronx$x, y = ~fit_bronx$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Bronx") %>%
+  add_trace(x = ~fit_mnhttn$x, y = ~fit_mnhttn$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Manhattan") %>%
+  add_trace(x = ~fit_queens$x, y = ~fit_queens$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Queens") %>%
+  add_trace(x = ~fit_staten$x, y = ~fit_staten$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Staten Island") %>%
+  layout(title = "Distribution density of violation scores in 5 Boroughs - 2019",
+         xaxis = list(title = 'Score', range = c(-1, 27)),
+         yaxis = list(title = 'Density'))
+
+```
+
+> __Interpretations__
+
+- The distribution density of violation scores in all 5 boroughs is approximately same
+- This means that every borough gets the scores evenly, there is no area where the distribution of scores unusually higher or lower compared to other boroughs.
+
+### Grade distribution among restaurants
+```{r, echo=TRUE}
+tmp <- df2019 %>%
+  dplyr::group_by(CAMIS, GRADE) %>%
+  dplyr::summarise(GRADE = unique(GRADE)) %>%
+  dplyr::ungroup()
+
+tmp <- tmp[tmp$GRADE != "",]
+tmp$CAMIS <- NULL
+tmp <- data.frame(table(tmp) * 100 / sum(table(tmp)))
+
+p <- plot_ly(x = tmp$tmp, y = tmp$Freq, type = "bar") %>%
+  layout(title = "Grade percentage",
+  xaxis = list(title="Grade"),
+  yaxis = list(title="Percentage", range=c(0,100), ticksuffix="%"),
+  bargap = 0.5)
+
+p
+```
+
+> __Interpretations__
+
+- 2019 ended with about 91% of restaurants having A grade, followed by grade B with 5% and grade C with 1%.
+- There are some grades other than A, B, C which represent pending grades
+- Overall it seems that restaurants are doing pretty good job of avoiding major violations
+
+
+### Grade distribution among restaurants by borough
+```{r, echo=TRUE}
+tmp <- df2019 %>%
+        dplyr::group_by(CAMIS, GRADE) %>%
+        dplyr::summarise(GRADE = unique(GRADE), BOROUGH = unique(BOROUGH)) %>%
+        dplyr::ungroup()
+
+tmp %>% filter(GRADE %in% c("A","B","C")) %>% 
+  dplyr::count(BOROUGH,GRADE) %>% 
+  ggplot(., aes(x=BOROUGH, y=n,fill=GRADE)) + 
+  geom_bar(stat="identity", width=0.4, alpha=0.8, color="black") +
+  facet_grid(GRADE~., scale="free") +
+  geom_text(aes(label=n), vjust=1.2) +
+  labs(x="Borough", y="Counts", title = "Grade distribution by borough - 2019") +
+  theme_grey()
+```
+
+> __Interpretations__
+
+- Manhattan leads by the number of restaurants in each grade.
+- Since Manhattan has largest number of restaurants, this is not surprising.
+
+### Grade distribution as a percentage among borough
+```{r, echo=TRUE}
+tmp %>% 
+  filter(GRADE %in% c("A","B","C")) %>%
+  dplyr::group_by(BOROUGH, GRADE) %>% 
+  dplyr::summarise(count = dplyr::n()) %>%
+  dplyr::mutate(Percent=count/sum(count)*100) %>%
+  dplyr::ungroup() %>%
+  ggplot(., aes(x=BOROUGH, y=Percent, fill=GRADE)) + 
+  geom_bar(aes(group=BOROUGH), stat="identity", width=0.4, alpha=0.8, color="black") + 
+  labs(x="", y="Percentage") + coord_flip() + theme_bw()
+```
+
+> __Interpretations__
+
+- Despite the differences between the number of restaurants among the different boroughs, the relative grade percentages are similar
+
+### Grade distribution among top 10 restaurants
+```{r, echo=TRUE}
+topc <- cuisine[1:10,'CUISINE' ]
+
+tmp <- df2019 %>% 
+  dplyr::filter(GRADE %in% c("A","B","C")) %>%
+  dplyr::filter(CUISINE %in% topc) %>%
+  dplyr::group_by(CUISINE, GRADE) %>% 
+  dplyr::summarise(Count=dplyr::n()) %>% 
+  dplyr::mutate(Percent=Count/sum(Count)*100) %>%
+  dplyr::ungroup()
+
+p <- plot_ly() %>%
+  add_pie(data = filter(tmp, CUISINE == "American"), labels = ~GRADE, values = ~Percent,
+                         name = "American", domain = list(row = 0, column = 0),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>American</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Chinese"), labels = ~GRADE, values = ~Percent,
+                         name = "Chinese", domain = list(row = 0, column = 1),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Chinese</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Cafe"), labels = ~GRADE, values = ~Percent,
+                         name = "Cafe", domain = list(row = 0, column = 2),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Cafe</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Pizza"), labels = ~GRADE, values = ~Percent,
+                         name = "Pizza", domain = list(row = 0, column = 3),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Pizza</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Mexican"), labels = ~GRADE, values = ~Percent,
+                         name = "Mexican", domain = list(row = 0, column = 4),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Mexican</b>") %>%
+  
+  add_pie(data = filter(tmp, CUISINE == "Italian"), labels = ~GRADE, values = ~Percent,
+                         name = "Italian", domain = list(row = 1, column = 0),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Italian</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Japanese"), labels = ~GRADE, values = ~Percent,
+                         name = "Japanese", domain = list(row = 1, column = 1),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Japanese</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Latin"), labels = ~GRADE, values = ~Percent,
+                         name = "Latin", domain = list(row = 1, column = 2),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Latin</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Bakery"), labels = ~GRADE, values = ~Percent,
+                         name = "Bakery", domain = list(row = 1, column = 3),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Bakery</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Caribbean"), labels = ~GRADE, values = ~Percent,
+                         name = "Caribbean", domain = list(row = 1, column = 4),
+          marker = list(colors=c("green", "orange", "red")), title = "<b>Caribbean</b>") %>%
+  layout(title = "Grade distribution among top 10 restaurants", showlegend = T,
+                      grid=list(rows=2, columns=5),
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                      yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+p
+
+invisible(dplyr::ungroup(df2019))
+```
+
+> __Interpretations__
+
+- In terms of grades Cafe's lead with over 94% of them receiving A grade
+- Cafe's also lead in terms of having the lowest %age of Grade C restaurants
+- Caribbean restaurants fared the worst as they have the lowest A grade percent restaurants and highest percentage of restaurants having C grade
+- Latin restaurants have the highest %age of Grade B restaurants
+- Most popular by number 'American' restaurants fared pretty well here with over 90% receiving A grades
+
+### Critical flag distribution among top 10 restaurants
+```{r, echo=TRUE}
+
+tmp <- df2019 %>% 
+  dplyr::filter(CRITICAL.FLAG %in% c("Y", "N")) %>%
+  dplyr::filter(CUISINE %in% topc) %>%
+  dplyr::group_by(CUISINE, CRITICAL.FLAG) %>% 
+  dplyr::summarise(Count=dplyr::n()) %>% 
+  dplyr::mutate(Percent=Count/sum(Count)*100) %>%
+  dplyr::ungroup()
+
+p <- plot_ly() %>%
+  add_pie(data = filter(tmp, CUISINE == "American"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "American", domain = list(row = 0, column = 0),
+          marker = list(colors=c("green", "red")), title = "<b>American</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Chinese"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Chinese", domain = list(row = 0, column = 1),
+          marker = list(colors=c("green", "red")), title = "<b>Chinese</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Cafe"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Cafe", domain = list(row = 0, column = 2),
+          marker = list(colors=c("green", "red")), title = "<b>Cafe</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Pizza"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Pizza", domain = list(row = 0, column = 3),
+          marker = list(colors=c("green", "red")), title = "<b>Pizza</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Mexican"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Mexican", domain = list(row = 0, column = 4),
+          marker = list(colors=c("green", "red")), title = "<b>Mexican</b>") %>%
+  
+  add_pie(data = filter(tmp, CUISINE == "Italian"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Italian", domain = list(row = 1, column = 0),
+          marker = list(colors=c("green", "red")), title = "<b>Italian</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Japanese"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Japanese", domain = list(row = 1, column = 1),
+          marker = list(colors=c("green", "red")), title = "<b>Japanese</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Latin"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Latin", domain = list(row = 1, column = 2),
+          marker = list(colors=c("green", "red")), title = "<b>Latin</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Bakery"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Bakery", domain = list(row = 1, column = 3),
+          marker = list(colors=c("green", "red")), title = "<b>Bakery</b>") %>%
+  add_pie(data = filter(tmp, CUISINE == "Caribbean"), labels = ~CRITICAL.FLAG, values = ~Percent,
+                         name = "Caribbean", domain = list(row = 1, column = 4),
+          marker = list(colors=c("green", "red")), title = "<b>Caribbean</b>") %>%
+  layout(title = "Critical flag distribution among top 10 restaurants", showlegend = T,
+                      grid=list(rows=2, columns=5),
+                      xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+                      yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+p
+```
+
+> __Interpretations__
+
+- All of them have about equal distribution of critical flags Yes and No
+- Among these, worst performance is by Latin restaurants having received critical flag in 52% of inspections
+- Best performers are again Cafe's receiving non critical flag as "N" in 54% of inspections
+- This finding is surprising since most restaurants received an A grade, despite receiving critical flags.
+
+### Violation score distribution by grade
+```{r, echo=TRUE}
+tmp <- df2019 %>%
+  dplyr::group_by(CAMIS, GRADE) %>%
+  dplyr::summarise(GRADE = unique(GRADE), SCORE = unique(SCORE)) %>%
+  dplyr::ungroup()
+
+tmp <- tmp[tmp$SCORE >= 0 & tmp$GRADE %in% c('A', 'B', 'C'), ]
+grade <- tmp$GRADE
+fact <- as.factor(grade)
+fact <- factor(fact, levels = c("C", "B", "A"))
+
+fig <- plot_ly(tmp,
+               y=tmp$SCORE,
+               color = fact,
+               type = "box",
+               boxmean = "sd",
+               colors = c("Red","Orange","green")) %>% 
+  layout(title = "Score distribution by grades",
+         xaxis = list(title = "Grade",
+                      zeroline = FALSE),
+         yaxis = list(title = "Violation Score",
+                      zeroline = FALSE))
+fig
+```
+
+> __Interpretations__
+
+- We can clearly see that the mean score values of Grade A are the lowest, followed by mean score values of Grade B, and then Grade C have the highest mean score values
+- So usually restaurant with lower score will get a better grade
+- There are some exceptions to this, as we can see some outliers in the plot
+- We can see one outlier for grade A with a score of 23, which is past the score of 13 points
+- There is one restaurant with score of 5, but has got a grade of B
+- In grade C, we can see a lot more outliers. The outliers at the extreme high end of score have got grade C as expected, but there are some restaurants which have got very low scores are still graded as C.
+- There might be other factors as well apart from the scoring policy which is effecting the grades
+
+
+### Violation score distribution among top 10 restaurants
+```{r, echo=TRUE}
+tmp_top10 <- df2019 %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(CUISINE = unique(CUISINE), SCORE = unique(SCORE)) %>%
+  dplyr::ungroup()
+
+top <- cuisine$CUISINE[1:10]
+
+tmp_top10 <- tmp_top10[tmp_top10$CUISINE %in% top,]
+
+tmp_top10 <- na.omit(tmp_top10)
+
+subplot(
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "American" & SCORE <= 30),
+          name = "American") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Chinese" & SCORE <= 30),
+          name = "Chinese") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Cafe" & SCORE <= 30), 
+          name = "Cafe") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Pizza" & SCORE <= 30),
+          name = "Pizza") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Mexican" & SCORE <= 30),
+          name = "Mexican") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider()
+)
+
+subplot(
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Italian" & SCORE <= 30),
+          name = "Italian") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Japanese" & SCORE <= 30), 
+          name = "Japanese") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Latin" & SCORE <= 30), 
+          name = "Latin") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Bakery" & SCORE <= 30), 
+          name = "Bakery") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Caribbean" & SCORE <= 30), 
+          name = "Caribbean") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider()
+)
+```
+
+> __Interpretations__
+
+- Distribution of scores among top 10 restaurants follow more or less the similar distribution as the score distribution.
+- One interesting observation to note is that the violation points are given as 2,5 & 7. With these 
+
+### Violation code
+```{r, echo=TRUE}
+v <- df2019$VIOLATION.CODE
+v <- v[!is.na(v)]
+v <- v[!(v == "")]
+
+violation <- df2019 %>%
+  dplyr::group_by(VIOLATION.CODE) %>%
+  dplyr::summarise(DESC = unique(VIOLATION.DESCRIPTION)) %>%
+  dplyr::ungroup()
+
+tmp <- data.frame(table(v) * 100 / sum(table(v)))
+tmp <- tmp[order(tmp$Freq, decreasing = TRUE),]
+topv <- as.character(tmp$v[1:10])
+
+p <- plot_ly(x = tmp$v, y = tmp$Freq, type = "bar") %>%
+  layout(title = "Violation codes as %age of total violations",
+  xaxis = list(title="Violation Code", categoryorder = "array", 
+         categoryarray = tmp$Freq),
+  yaxis = list(title="Percentage", ticksuffix="%")) %>%
+  rangeslider()
+
+p
+```
+> __Interpretations__
+
+- About 71% of the violations are captured by the 10 most common codes
+- The critical violations start with 02 and go on till 07 (See the critical & non critical levels [here](https://www1.nyc.gov/assets/doh/downloads/pdf/rii/guide-condition-levels.pdf))
+- Thus out of the top 10 violations, 6 are of critical level
+- 3 out of 10 involve pests
+- Top 10 violation description are below:
+  -- 10F: Non-food contact surface improperly constructed (generally pertains to difficulty of cleaning, an example would be a hard to clean or improperly sealed wall)
+  --08A: Facility not vermin proof
+  --06D: Food contact surface not washed after each use or after potentially contaminating activity (example: meat slicer encrusted with food debris)
+  --10B: Plumbing not properly installed or maintained (example: refrigerator condensation draining into a bucket, AC draining onto sidewalk)
+  --04L: Evidence of mice or live mice present in facility
+  --06C: Food not protected from potential source of contamination during storage, preparation, transportation, display or service
+  --02G: Cold food item held above 41 deg F (38 deg for smoked fish or vacuum packed items), except during necessary preparation
+  --04N: Flies present in facility
+  --02B: Hot food item not held at or above 140 deg F
+  --09C: Food contact surface not properly maintained (example: one cutting board discolored)
+
+
+
+### Inspection Types
+```{r, echo=TRUE}
+itype <- df2019 %>%
+  dplyr::group_by(INSPECTION.TYPE) %>%
+  dplyr::summarise(n = dplyr::n()) %>%
+  dplyr::ungroup()
+
+itype$n <- (itype$n * 100)/sum(itype$n)
+itype <- itype[order(itype$n, decreasing = TRUE),]
+itype <- itype[1:5,]
+
+p <- plot_ly(x = itype$INSPECTION.TYPE, y = itype$n, type = "bar") %>%
+  layout(title = "Top 5 Inspection type",
+  xaxis = list(title="Inspection Types", categoryorder = "array", 
+         categoryarray = tmp$Freq),
+  yaxis = list(title="Percentage", ticksuffix="%"))
+
+p
+```
+> __Interpretations__
+
+- Cycle inspections(initial & re-inspection) are the most common, covering more than 80% of inspections
+- Of these most of them are initial inspection, and re-inspection are less. Explanation might be if a restaurant gets grade A, then it will not be reinspected (only the initial inspection in the next cycle), but for all other grades there will be re-inspections.
+- Since most of the restaurants got an A grade, and if we assume that most of them got A on their first inspection then this result can be explained.
+
+### Number of inspection type related to pests by month 
+```{r, echo=TRUE}
+tmp <- df2019 %>%
+  dplyr::filter(VIOLATION.CODE %in% topv | VIOLATION.CODE == "04M") %>%
+  dplyr::group_by(VIOLATION.CODE, MONTH) %>%
+  dplyr::summarise(Count=dplyr::n()) %>%
+  dplyr::ungroup()
+
+t08A <- tmp[tmp$VIOLATION.CODE == "08A", c('MONTH', 'Count')]
+t08A$Percent <- t08A$Count/sum(t08A$Count)
+
+t04L <- tmp[tmp$VIOLATION.CODE == "04L", c('MONTH', 'Count')]
+t04L$Percent <- t04L$Count/sum(t04L$Count)
+
+t04N <- tmp[tmp$VIOLATION.CODE == "04N", c('MONTH', 'Count')]
+t04N$Percent <- t04N$Count/sum(t04N$Count)
+
+t04M <- tmp[tmp$VIOLATION.CODE == "04M", c('MONTH', 'Count')]
+t04M$Percent <- t04M$Count/sum(t04M$Count)
+
+p <- plot_ly(data = t08A,x = ~MONTH, y = ~Percent, type = "bar", name = "08A: Vermin") %>%
+  add_trace(x = t04L$MONTH, y = t04L$Percent, name = "04L: Mice") %>%
+  add_trace(x = t04N$MONTH, y = t04N$Percent, name = "04N: Flies") %>%
+  add_trace(x = t04M$MONTH, y = t04M$Percent, name = "04M: Roaches") %>%
+  layout(title = "Inspection type related to pests by month",
+  xaxis = list(title="Month"),
+  yaxis = list(title="Density"))
+p
+
+```
+> __Interpretations__
+
+- Interesting observations on the inspection types related to pests
+- The number of observations are very low during the start of the year and all through summer
+- AFter spring, the number of violations related to these are increased every month till Dec
+- This might indicate that flies/roaches/vermins reproduce more in late spring and then seek to stay indoors near sources of food (for example, in kitchens) for as long as possible.
+
+
+# Central Limit Theorem
+## Random Sampling
+- Remember our score distribution for violation score
+```{r, echo=TRUE}
+df2019 %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(SCORE = unique(SCORE)) %>%
+  dplyr::ungroup() %>%
+  plot_ly(x = ~SCORE, type = "histogram") %>%
+  layout(title = "Distribution of violation scores - 2019",
+    xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+    yaxis = list(title = "Count")) %>%
+  rangeslider()
+```
+ 
+Below are the stats for the scores for year 2019
+```{r, echo=TRUE, results='hold'}
+tmp <- df2019 %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(SCORE = unique(SCORE)) %>%
+  dplyr::ungroup()
+
+paste("Max value of score:", max(tmp$SCORE, na.rm = TRUE))
+paste("\nMin value of score:", min(tmp$SCORE, na.rm = TRUE))
+paste("\nMean value of score:", mean(tmp$SCORE, na.rm = TRUE))
+paste("\nStandard Deviation value of score:", sd(tmp$SCORE, na.rm = TRUE))
+```
+
+- The Central Limit Theorem states that the distribution of the sample means for a given sample size of the population has the shape of the normal distribution
+- We will take 1000 random samples from the score population of sizes 10, 20, 30 & 40 and see the results
+```{r, echo=TRUE, results='hold'}
+set.seed(3333)
+tmp <- na.omit(tmp)
+samples <- 1000
+sample.size <- 10
+
+xbar1 <- numeric(samples)
+
+for (i in 1:samples){
+  xbar1[i] <- mean(sample(tmp$SCORE, sample.size, replace = TRUE))
+}
+
+cat("\n")
+cat("For 1000 random samples of size ", sample.size)
+cat("\nMean value of score: ", mean(xbar1))
+cat("\nStandard Deviation value of score: ", sd(xbar1))
+
+sample.size <- 20
+
+xbar2 <- numeric(samples)
+
+for (i in 1:samples){
+  xbar2[i] <- mean(sample(tmp$SCORE, sample.size, replace = TRUE))
+}
+cat("\n")
+cat("For 1000 random samples of size ", sample.size)
+cat("\nMean value of score: ", mean(xbar2))
+cat("\nStandard Deviation value of score: ", sd(xbar2))
+
+sample.size <- 30
+
+xbar3 <- numeric(samples)
+
+for (i in 1:samples){
+  xbar3[i] <- mean(sample(tmp$SCORE, sample.size, replace = TRUE))
+}
+cat("\n")
+cat("For 1000 random samples of size ", sample.size)
+cat("\nMean value of score: ", mean(xbar3))
+cat("\nStandard Deviation value of score: ", sd(xbar3))
+
+sample.size <- 40
+
+xbar4 <- numeric(samples)
+
+for (i in 1:samples){
+  xbar4[i] <- mean(sample(tmp$SCORE, sample.size, replace = TRUE))
+}
+cat("\n")
+cat("For 1000 random samples of size ", sample.size)
+cat("\nMean value of score: ", mean(xbar4))
+cat("\nStandard Deviation value of score: ", sd(xbar4))
+
+fit_10 <- density(xbar1)
+fit_20 <- density(xbar2)
+fit_30 <- density(xbar3)
+fit_40 <- density(xbar4)
+
+```
+
+
+- Distribution curve of the samples
+```{r, echo=TRUE}
+plot_ly(x = ~fit_10$x, y = ~fit_10$y, type = 'scatter', mode = 'lines', 
+        fill = 'tozeroy', name = "Sample size: 10") %>%
+  add_trace(x = ~fit_20$x, y = ~fit_20$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Sample size: 20") %>%
+  add_trace(x = ~fit_30$x, y = ~fit_30$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Sample size: 30") %>%
+  add_trace(x = ~fit_40$x, y = ~fit_40$y, type = 'scatter', mode = 'lines', 
+            fill = 'tozeroy', name = "Sample size: 40") %>%
+  layout(title = "Distribution density of various sample sizes for violation score",
+         xaxis = list(title = 'Score'),
+         yaxis = list(title = 'Density'))
+```
+
+> __Interpretations__
+
+- We can observe that the distribution appears to be normal
+- The mean and standard deviation also are very close to the original population data
+
+## Sampling Techniques
+### Random sampling
+
+We have already covered this above in Central Limit Theorem
+
+### Systematic Sampling
+
+#### Equal Probabilities
+
+Let us take 1000 samples of size 50 for Equal probabilities sampling techniques
+```{r, echo=TRUE, results='hold'}
+
+scores <- tmp$SCORE
+
+scores <- scores[scores >= 0]
+
+samples <- 1000
+N <- length(scores)
+n <- 50
+
+x_scores <- numeric(samples)
+
+for (i in 1:samples){
+  k <- ceiling(N/n)
+  r <- sample(scores, 1)
+
+  xbar <- seq(r, by = k, length = n)
+  
+  for (j in xbar){
+    x_scores[i] <- mean(scores[xbar])
+  }
+  
+}
+
+cat("\n")
+cat("For 1000 random samples of size ", n)
+cat("\nMean value of score: ", mean(x_scores))
+cat("\nStandard Deviation value of score: ", sd(x_scores))
+
+fit <- density(x_scores)
+
+```
+
+- Distribution curve of the sample
+```{r, echo=TRUE}
+plot_ly(x = ~fit$x, y = ~fit$y, type = 'scatter', mode = 'lines', 
+        fill = 'tozeroy', name = "Sample size: 50") %>%
+  layout(title = "Equal Probability: Distribution density of sample size 50 for violation score",
+         xaxis = list(title = 'Score'),
+         yaxis = list(title = 'Density'))
+```
+
+> __Interpretations__
+
+- With this technique, distribution doesn't seem normal
+
+
+#### Unequal Probabilities
+Let us take 1000 samples of size 50 for Equal probabilities sampling techniques
+```{r, echo=TRUE, results='hold'}
+
+scores_nonzero <- scores[scores > 0]
+samples <- 1000
+x_scores <- numeric(samples)
+
+for (i in 1:samples){
+  pik <- inclusionprobabilities(scores_nonzero, 50)
+  s <- UPsystematic(pik)
+  sample <- scores_nonzero[s!=0]
+  x_scores[i] <- mean(sample)
+}
+
+cat("\n")
+cat("For 1000 random samples of size ", n)
+cat("\nMean value of score: ", mean(x_scores))
+cat("\nStandard Deviation value of score: ", sd(x_scores))
+
+fit <- density(x_scores)
+
+```
+
+- Distribution curve of the sample
+```{r, echo=TRUE, results='hold'}
+plot_ly(x = ~fit$x, y = ~fit$y, type = 'scatter', mode = 'lines', 
+        fill = 'tozeroy', name = "Sample size: 50") %>%
+  layout(title = "Unequal Probability: Distribution density of sample size 50 for violation score",
+         xaxis = list(title = 'Score'),
+         yaxis = list(title = 'Density'))
+```
+
+> __Interpretations__
+
+- This distribution looks more like a normal distribution
+
+## Stratified sampling - Unequal Data
+
+> Stratified sampling on scores based on top 10 cuisine
+Following is the freq table for the top 10 restaurants
+
+```{r, echo=TRUE, results='hold'}
+tmp <- df2019 %>%
+  dplyr::filter(CUISINE %in% topc) %>%
+  dplyr::group_by(CAMIS) %>%
+  dplyr::summarise(CUISINE = unique(CUISINE), SCORE = unique(SCORE)) %>%
+  dplyr::ungroup()
+
+tmp$CAMIS <- NULL
+tmp <- tmp[tmp$SCORE >= 0,]
+tmp <- na.omit(tmp)
+
+table(tmp$CUISINE)
+
+```
+
+> Let us show an example of how to get 50 samples by stratified sampling on our data
+
+```{r, echo=TRUE, results='hold'}
+n <- 50
+freq <- table(tmp$CUISINE)
+st.sizes <- n * freq / sum(freq)
+
+st <- strata(tmp, stratanames = c("CUISINE"), size = st.sizes, method = "srswor",
+             description = TRUE)
+```
+
+> We can check what samples were taken
+
+```{r, echo=TRUE, results='hold'}
+st
+```
+
+> Let us repeat this step 1000 times and get the distribution
+
+```{r, echo=TRUE, results='hold'}
+sc <- tmp[st$ID_unit,'SCORE']
+dfs <- as.data.frame(st$CUISINE)
+dfs$SCORE <- sc$SCORE
+dfs <- dplyr::rename(dfs,"CUISINE" = "st$CUISINE")
+
+for (i in 1:999){
+  st <- strata(tmp, stratanames = c("CUISINE"), size = st.sizes, method = "srswor",
+             description = FALSE)
+  sc <- tmp[st$ID_unit,'SCORE']
+  tmp_dfs <- as.data.frame(st$CUISINE)
+  tmp_dfs$SCORE <- sc$SCORE
+  tmp_dfs <- dplyr::rename(tmp_dfs,"CUISINE" = "st$CUISINE")
+  dfs <- rbind(dfs, tmp_dfs)
+}
+
+table(dfs$CUISINE)
+```
+
+> We can now plot the score distribution. Let us compare with the top 5
+
+```{r, echo=TRUE, results='hold'}
+subplot(
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "American" & SCORE <= 30),
+          name = "American") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Chinese" & SCORE <= 30),
+          name = "Chinese") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Cafe" & SCORE <= 30), 
+          name = "Cafe") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Pizza" & SCORE <= 30),
+          name = "Pizza") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(tmp_top10, CUISINE == "Mexican" & SCORE <= 30),
+          name = "Mexican") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider()
+)
+
+subplot(
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(dfs, CUISINE == "American" & SCORE <= 30),
+          name = "American") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(dfs, CUISINE == "Chinese" & SCORE <= 30), 
+          name = "Chinese") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(dfs, CUISINE == "Cafe" & SCORE <= 30), 
+          name = "Cafe") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(dfs, CUISINE == "Pizza" & SCORE <= 30), 
+          name = "Pizza") %>%
+    layout(title = "Distribution of violation scores - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider(),
+  plot_ly(x = ~SCORE, type = "histogram", data = filter(dfs, CUISINE == "Mexican" & SCORE <= 30), 
+          name = "Mexican") %>%
+    layout(title = "Distribution of violation scores via Stratified Sampling - 2019",
+           xaxis = list(title = "Score", dtick = 2, tickmode = "linear"),
+           yaxis = list(title = "Count"),
+           bargap = 0.3) %>%
+    rangeslider()
+)
+```
+
+> Lets check the stats
+
+```{r, echo=TRUE, results='hold'}
+
+for (i in 1:10) {
+  pop <- tmp_top10[tmp_top10$CUISINE == topc[i], c('SCORE')]
+  smp <- dfs[dfs$CUISINE == topc[i], c('SCORE')]
+  
+  cat("\n\n", topc[i])
+  cat("\nMean of population:", mean(pop$SCORE))
+  cat("\nSD of population:", sd(pop$SCORE))
+  cat("\nMean of samples:", mean(smp))
+  cat("\nSD of samples:", sd(smp))
+  
+}
+```
+
+
+# Final Conclusion
+
+> Looking at the below graph (barring 2020), we can see that the number of restaurants receiving grade A is increasing which presents a good outlook for the people who take resturant eating into consideration
+
+```{r, echo=TRUE, results='hold'}
+tmp <- inspnew %>%
+  dplyr::filter(GRADE %in% c("A","B","C")) %>%
+  dplyr::group_by(YEAR, GRADE) %>%
+  dplyr::summarise(count = dplyr::n()) %>%
+  dplyr::ungroup()
+
+tmp$CAMIS <- NULL
+A <- tmp[tmp$GRADE == "A", c("YEAR","count")]
+B <- tmp[tmp$GRADE == "B", c("YEAR","count")]
+C <- tmp[tmp$GRADE == "C", c("YEAR","count")]
+
+plot_ly(x = A$YEAR, y=A$count, type="scatter", mode = 'lines+markers', name = "A", color = "green") %>%
+  add_trace(x = B$YEAR, y=B$count, type="scatter", mode = 'lines+markers', name = "B", color = "orange") %>%
+  add_trace(x = C$YEAR, y=C$count, type="scatter", mode = 'lines+markers', name = "C", color = "red") %>%
+  layout(title = "Grade change over the years",
+           xaxis = list(title = "Year"),
+           yaxis = list(title = "Number of restaurants"))
+```
